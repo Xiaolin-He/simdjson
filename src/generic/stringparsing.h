@@ -72,7 +72,8 @@ really_inline bool handle_unicode_codepoint(const uint8_t **src_ptr,
 WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
                                             UNUSED size_t len, ParsedJson &pj,
                                             UNUSED const uint32_t depth,
-                                            UNUSED uint32_t offset) {
+                                            UNUSED uint32_t offset,
+                                            uint32_t& block) {
   pj.write_tape(pj.current_string_buf_loc - pj.string_buf, '"');
   const uint8_t *src = &buf[offset + 1]; /* we know that buf at offset is a " */
   uint8_t *dst = pj.current_string_buf_loc + sizeof(uint32_t);
@@ -80,11 +81,11 @@ WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
   while (1) {
     parse_string_helper helper = find_bs_bits_and_quote_bits(src, dst);
     if (((helper.bs_bits - 1) & helper.quote_bits) != 0) {
-      /* we encountered quotes first. Move dst to point to quotes and exit
-       */
+      /* we encountered quotes first. Move dst to point to quotes and exit */
 
       /* find out where the quote is... */
       auto quote_dist = trailing_zeroes(helper.quote_bits);
+      /* Update the block past the string so we don't have to advance through the string again */
 
       /* NULL termination is still handy if you expect all your strings to
        * be NULL terminated? */
@@ -105,6 +106,7 @@ WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
       /* we advance the point, accounting for the fact that we have a NULL
        * termination         */
       pj.current_string_buf_loc = dst + quote_dist + 1;
+      block = ((src - buf) + quote_dist + 1) / 64;
       return true;
     }
     if (((helper.quote_bits - 1) & helper.bs_bits) != 0) {

@@ -3,12 +3,18 @@
 // We assume the file in which it is include already includes
 // "simdjson/stage2_build_tape.h" (this simplifies amalgation)
 
-// this macro reads the next structural character, updating idx, i and c.
-#define UPDATE_CHAR()                                                          \
-  {                                                                            \
-    idx = pj.structural_indexes[i++];                                          \
-    c = buf[idx];                                                              \
+// this macro reads the next structural character, updating block, idx, and c.
+#define UPDATE_CHAR()                                                \
+  {                                                                  \
+    block += (pj.structurals[block] == 0);                           \
+    while (pj.structurals[block] == 0) {                             \
+      block++;                                                       \
+    }                                                                \
+    idx = block*64 + trailing_zeroes(pj.structurals[block]);         \
+    pj.structurals[block] = clear_lowest_bit(pj.structurals[block]); \
+    c = buf[idx];                                                    \
   }
+#define AT_EOF() (block >= (ROUNDUP_N(len, 64)/64 - 1) && pj.structurals[block] == 0)
 
 #ifdef SIMDJSON_USE_COMPUTED_GOTO
 #define SET_GOTO_ARRAY_CONTINUE() pj.ret_address[depth] = &&array_continue;
@@ -37,13 +43,11 @@
  ***********/
 WARN_UNUSED  int
 unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
-  uint32_t i = 0; /* index of the structural character (0,1,2,3...) */
-  uint32_t idx; /* location of the structural character in the input (buf)   */
-  uint8_t c;    /* used to track the (structural) character we are looking at,
-                   updated */
-  /* by UPDATE_CHAR macro */
-  uint32_t depth = 0; /* could have an arbitrary starting depth */
-  pj.init();          /* sets is_valid to false          */
+  uint32_t block = 0; // current structural block we're looking at
+  uint32_t idx; // location of the structural character in the input (buf)
+  uint8_t c;    // used to track the (structural) character we are looking at, updated by UPDATE_CHAR macro
+  uint32_t depth = 0; // could have an arbitrary starting depth
+  pj.init();          // sets is_valid to false
   if (pj.byte_capacity < len) {
     pj.error_code = simdjson::CAPACITY;
     return pj.error_code;
@@ -71,8 +75,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     if (depth >= pj.depth_capacity) {
       goto fail;
     }
-    pj.write_tape(
-        0, c); /* strangely, moving this to object_begin slows things down */
+    pj.write_tape(0, c); /* strangely, moving this to object_begin slows things down */
     goto object_begin;
   case '[':
     pj.containing_scope_offset[depth] = pj.get_current_loc();
@@ -92,7 +95,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
      * https://tools.ietf.org/html/rfc8259
      * #ifdef SIMDJSON_ALLOWANYTHINGINROOT */
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx)) {
+    if (!parse_string(buf, len, pj, depth, idx, block)) {
       goto fail;
     }
     break;
@@ -210,7 +213,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
   }
 start_continue:
   /* the string might not be NULL terminated. */
-  if (i + 1 == pj.n_structural_indexes) {
+  if (AT_EOF()) {
     goto succeed;
   } else {
     goto fail;
@@ -221,7 +224,7 @@ object_begin:
   UPDATE_CHAR();
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx)) {
+    if (!parse_string(buf, len, pj, depth, idx, block)) {
       goto fail;
     }
     goto object_key_state;
@@ -240,7 +243,7 @@ object_key_state:
   UPDATE_CHAR();
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx)) {
+    if (!parse_string(buf, len, pj, depth, idx, block)) {
       goto fail;
     }
     break;
@@ -325,7 +328,7 @@ object_continue:
     if (c != '"') {
       goto fail;
     } else {
-      if (!parse_string(buf, len, pj, depth, idx)) {
+      if (!parse_string(buf, len, pj, depth, idx, block)) {
         goto fail;
       }
       goto object_key_state;
@@ -359,7 +362,7 @@ main_array_switch:
    * on paths that can accept a close square brace (post-, and at start) */
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx)) {
+    if (!parse_string(buf, len, pj, depth, idx, block)) {
       goto fail;
     }
     break;
