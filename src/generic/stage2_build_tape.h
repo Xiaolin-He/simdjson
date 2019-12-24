@@ -3,18 +3,50 @@
 // We assume the file in which it is include already includes
 // "simdjson/stage2_build_tape.h" (this simplifies amalgation)
 
-// this macro reads the next structural character, updating block, idx, and c.
-#define UPDATE_CHAR()                                                \
-  {                                                                  \
-    block += (pj.structurals[block] == 0);                           \
-    while (pj.structurals[block] == 0) {                             \
-      block++;                                                       \
-    }                                                                \
-    idx = block*64 + trailing_zeroes(pj.structurals[block]);         \
-    pj.structurals[block] = clear_lowest_bit(pj.structurals[block]); \
-    c = buf[idx];                                                    \
+really_inline void advance_structurals(uint32_t& structural_block, uint32_t& next_idx, uint64_t& structurals, const ParsedJson& pj) {
+  structurals = clear_lowest_bit(structurals);
+  bool is_last_structural_in_block = structurals == 0;
+  if (is_last_structural_in_block) {
+    printf("New structurals is %d\n", structural_block+is_last_structural_in_block);
   }
-#define AT_EOF() (block >= (ROUNDUP_N(len, 64)/64 - 1) && pj.structurals[block] == 0)
+  structurals = is_last_structural_in_block ? pj.structural_blocks[structural_block+1] : structurals;
+  structural_block += is_last_structural_in_block;
+  printf("next_idx = %d - %d + %d*64 + %d = %d\n", next_idx, (next_idx%64), is_last_structural_in_block, trailing_zeroes(structurals), next_idx - (next_idx % 64) + is_last_structural_in_block*64 + trailing_zeroes(structurals));
+  next_idx -= next_idx % 64;
+  next_idx += is_last_structural_in_block*64 + trailing_zeroes(structurals);
+}
+
+really_inline void adjust_next_idx(uint32_t& next_idx, uint32_t start_idx, uint32_t end_idx) {
+  // Everything except next_idx is already set correctly. Adjust it by (# of blocks to reach end_idx) + (whether we had a )
+  printf("Adjusting next_idx (%u) by %d + (%d - %d) = %d + %d = %d\n", next_idx, end_idx % 64, (next_idx % 64), (start_idx % 64), end_idx % 64, (next_idx % 64) - (start_idx % 64), (end_idx % 64) + ((next_idx % 64) - (start_idx % 64)));
+  next_idx += (end_idx % 64) + ((next_idx % 64) - (start_idx % 64));
+}
+
+// this macro reads the next structural character, updating block, idx, and c.
+#define UPDATE_CHAR()                                                             \
+  {                                                                               \
+    c = buf[next_idx];                                                            \
+    idx = next_idx;                                                               \
+    printf("Structural at %u is %c\n", idx, c); \
+    advance_structurals(structural_block, next_idx, structurals, pj);   \
+  }
+#define AT_EOF() (structural_block >= pj.num_structural_blocks)
+#define PARSE_STRING()                                                 \
+  {                                                                    \
+    uint32_t end_idx = parse_string(buf, len, pj, depth, idx);         \
+    if (!end_idx) {                                                    \
+      goto fail;                                                       \
+    }                                                                  \
+    adjust_next_idx(next_idx, idx, end_idx);                           \
+  }
+#define ELSE_CHAR(LABEL) \
+  case ' ':     \
+  case '\n':    \
+  case '\r':    \
+  case '\t':    \
+    goto LABEL; \
+  default:      \
+    goto fail;
 
 #ifdef SIMDJSON_USE_COMPUTED_GOTO
 #define SET_GOTO_ARRAY_CONTINUE() pj.ret_address[depth] = &&array_continue;
@@ -43,7 +75,9 @@
  ***********/
 WARN_UNUSED  int
 unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
-  uint32_t block = 0; // current structural block we're looking at
+  uint32_t structural_block = 0; // current structural block we're looking at
+  uint64_t structurals = pj.structural_blocks[structural_block];
+  uint32_t next_idx = trailing_zeroes(structurals); // *index* of the structural block we're looking at
   uint32_t idx; // location of the structural character in the input (buf)
   uint8_t c;    // used to track the (structural) character we are looking at, updated by UPDATE_CHAR macro
   uint32_t depth = 0; // could have an arbitrary starting depth
@@ -55,7 +89,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
 
   /*//////////////////////////// START STATE /////////////////////////////
    */
-  SET_GOTO_START_CONTINUE()
+  SET_GOTO_START_CONTINUE();
   pj.containing_scope_offset[depth] = pj.get_current_loc();
   pj.write_tape(0, 'r'); /* r for root, 0 is going to get overwritten */
   /* the root is used, if nothing else, to capture the size of the tape */
@@ -66,6 +100,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     goto fail;
   }
 
+start:
   UPDATE_CHAR();
   switch (c) {
   case '{':
@@ -95,9 +130,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
      * https://tools.ietf.org/html/rfc8259
      * #ifdef SIMDJSON_ALLOWANYTHINGINROOT */
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx, block)) {
-      goto fail;
-    }
+    PARSE_STRING();
     break;
   }
   case 't': {
@@ -208,8 +241,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     free(copy);
     break;
   }
-  default:
-    goto fail;
+  ELSE_CHAR(start);
   }
 start_continue:
   /* the string might not be NULL terminated. */
@@ -224,9 +256,7 @@ object_begin:
   UPDATE_CHAR();
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx, block)) {
-      goto fail;
-    }
+    PARSE_STRING();
     goto object_key_state;
   }
   case '}':
@@ -238,14 +268,15 @@ object_begin:
 object_key_state:
   UPDATE_CHAR();
   if (c != ':') {
-    goto fail;
+    switch (c) {
+      ELSE_CHAR(object_key_state)
+    }
   }
+object_value_state:
   UPDATE_CHAR();
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx, block)) {
-      goto fail;
-    }
+    PARSE_STRING();
     break;
   }
   case 't':
@@ -316,8 +347,7 @@ object_key_state:
     }
     goto array_begin;
   }
-  default:
-    goto fail;
+  ELSE_CHAR(object_value_state)
   }
 
 object_continue:
@@ -328,15 +358,12 @@ object_continue:
     if (c != '"') {
       goto fail;
     } else {
-      if (!parse_string(buf, len, pj, depth, idx, block)) {
-        goto fail;
-      }
+      PARSE_STRING();
       goto object_key_state;
     }
   case '}':
     goto scope_end;
-  default:
-    goto fail;
+  ELSE_CHAR(object_continue)
   }
 
   /*//////////////////////////// COMMON STATE ///////////////////////////*/
@@ -353,8 +380,14 @@ scope_end:
   /*//////////////////////////// ARRAY STATES ///////////////////////////*/
 array_begin:
   UPDATE_CHAR();
-  if (c == ']') {
-    goto scope_end; /* could also go to array_continue */
+  switch (c) {
+    case ']':
+      goto scope_end;
+    case ' ':
+    case '\t':
+    case '\r':
+    case '\n':
+      goto array_begin;
   }
 
 main_array_switch:
@@ -362,9 +395,7 @@ main_array_switch:
    * on paths that can accept a close square brace (post-, and at start) */
   switch (c) {
   case '"': {
-    if (!parse_string(buf, len, pj, depth, idx, block)) {
-      goto fail;
-    }
+    PARSE_STRING();
     break;
   }
   case 't':
@@ -436,6 +467,12 @@ main_array_switch:
     }
     goto array_begin;
   }
+  case ' ':
+  case '\r':
+  case '\t':
+  case '\n':
+    UPDATE_CHAR();
+    goto main_array_switch;
   default:
     goto fail;
   }
@@ -448,8 +485,7 @@ array_continue:
     goto main_array_switch;
   case ']':
     goto scope_end;
-  default:
-    goto fail;
+  ELSE_CHAR(array_continue)
   }
 
   /*//////////////////////////// FINAL STATES ///////////////////////////*/

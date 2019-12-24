@@ -69,11 +69,10 @@ really_inline bool handle_unicode_codepoint(const uint8_t **src_ptr,
   return offset > 0;
 }
 
-WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
+WARN_UNUSED really_inline uint32_t parse_string(UNUSED const uint8_t *buf,
                                             UNUSED size_t len, ParsedJson &pj,
                                             UNUSED const uint32_t depth,
-                                            UNUSED uint32_t offset,
-                                            uint32_t& block) {
+                                            UNUSED uint32_t offset) {
   pj.write_tape(pj.current_string_buf_loc - pj.string_buf, '"');
   const uint8_t *src = &buf[offset + 1]; /* we know that buf at offset is a " */
   uint8_t *dst = pj.current_string_buf_loc + sizeof(uint32_t);
@@ -106,8 +105,7 @@ WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
       /* we advance the point, accounting for the fact that we have a NULL
        * termination         */
       pj.current_string_buf_loc = dst + quote_dist + 1;
-      block = ((src - buf) + quote_dist + 1) / 64;
-      return true;
+      return (src + quote_dist) - buf;
     }
     if (((helper.quote_bits - 1) & helper.bs_bits) != 0) {
       /* find out where the backspace is */
@@ -120,7 +118,7 @@ WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
         src += bs_dist;
         dst += bs_dist;
         if (!handle_unicode_codepoint(&src, &dst)) {
-          return false;
+          return 0;
         }
       } else {
         /* simple 1:1 conversion. Will eat bs_dist+2 characters in input and
@@ -143,5 +141,5 @@ WARN_UNUSED really_inline bool parse_string(UNUSED const uint8_t *buf,
     }
   }
   /* can't be reached */
-  return true;
+  return 0;
 }

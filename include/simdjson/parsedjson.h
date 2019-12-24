@@ -111,7 +111,8 @@ public:
   size_t tape_capacity{0};
   size_t string_capacity{0};
   uint32_t current_loc{0};
-  uint64_t *structurals;
+  size_t num_structural_blocks{0};
+  uint64_t *structural_blocks;
 
   uint64_t *tape;
   uint32_t *containing_scope_offset;

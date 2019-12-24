@@ -120,7 +120,7 @@ struct json_stats {
     bool last_block_has_16_structurals = false;
     for (size_t block=0; block<blocks; block++) {
       // Count structurals in the block
-      int block_structurals = simdjson::westmere::hamming(pj.structurals[block]);
+      int block_structurals = simdjson::westmere::hamming(pj.structural_blocks[block]);
 
       bool block_has_0_structurals = block_structurals == 0;
       if (block_has_0_structurals) {
