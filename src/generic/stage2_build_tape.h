@@ -3,41 +3,33 @@
 // We assume the file in which it is include already includes
 // "simdjson/stage2_build_tape.h" (this simplifies amalgation)
 
-really_inline void advance_structurals(uint32_t& structural_block, uint32_t& next_idx, uint64_t& structurals, const ParsedJson& pj) {
-  structurals = clear_lowest_bit(structurals);
-  bool is_last_structural_in_block = structurals == 0;
-  if (is_last_structural_in_block) {
-    printf("New structurals is %d\n", structural_block+is_last_structural_in_block);
-  }
-  structurals = is_last_structural_in_block ? pj.structural_blocks[structural_block+1] : structurals;
-  structural_block += is_last_structural_in_block;
-  printf("next_idx = %d - %d + %d*64 + %d = %d\n", next_idx, (next_idx%64), is_last_structural_in_block, trailing_zeroes(structurals), next_idx - (next_idx % 64) + is_last_structural_in_block*64 + trailing_zeroes(structurals));
-  next_idx -= next_idx % 64;
-  next_idx += is_last_structural_in_block*64 + trailing_zeroes(structurals);
+const size_t BLOCK_SIZE = 64;
+
+really_inline void advance(const uint8_t*& block, int& offset, uint64_t*& structurals) {
+  // If there are no more structurals in this block, advance to the next
+  bool is_last_structural_in_block = *structurals == 0;
+  structurals += is_last_structural_in_block;
+  block += is_last_structural_in_block*BLOCK_SIZE;
+
+  // Steal the trailing bit, taking the next structural offset
+  offset = trailing_zeroes(*structurals);
+  *structurals = clear_lowest_bit(*structurals);
 }
 
-really_inline void adjust_next_idx(uint32_t& next_idx, uint32_t start_idx, uint32_t end_idx) {
-  // Everything except next_idx is already set correctly. Adjust it by (# of blocks to reach end_idx) + (whether we had a )
-  printf("Adjusting next_idx (%u) by %d + (%d - %d) = %d + %d = %d\n", next_idx, end_idx % 64, (next_idx % 64), (start_idx % 64), end_idx % 64, (next_idx % 64) - (start_idx % 64), (end_idx % 64) + ((next_idx % 64) - (start_idx % 64)));
-  next_idx += (end_idx % 64) + ((next_idx % 64) - (start_idx % 64));
-}
-
-// this macro reads the next structural character, updating block, idx, and c.
-#define UPDATE_CHAR()                                                             \
-  {                                                                               \
-    c = buf[next_idx];                                                            \
-    idx = next_idx;                                                               \
-    printf("Structural at %u is %c\n", idx, c); \
-    advance_structurals(structural_block, next_idx, structurals, pj);   \
-  }
-#define AT_EOF() (structural_block >= pj.num_structural_blocks)
-#define PARSE_STRING()                                                 \
-  {                                                                    \
-    uint32_t end_idx = parse_string(buf, len, pj, depth, idx);         \
-    if (!end_idx) {                                                    \
-      goto fail;                                                       \
-    }                                                                  \
-    adjust_next_idx(next_idx, idx, end_idx);                           \
+// This macro reads the next structural character, updating block, offset
+// and structurals. Returns the current character (which can be reached at
+// block[offset]).
+#define ADVANCE() (advance(block, offset, structurals), block[offset])
+#define PARSE_STRING()                                \
+  {                                                   \
+    int new_offset = parse_string(block, offset, pj); \
+    if (unlikely(new_offset == 0)) {                  \
+      goto fail;                                      \
+    }                                                 \
+    /* If it completely skipped any blocks, advance block */ \
+    int blocks_skipped = new_offset / BLOCK_SIZE - 1; \
+    blocks_skipped = (blocks_skipped < 0) ? 0 : blocks_skipped; /* Saturating sub via CMOV */ \
+    block += BLOCK_SIZE*blocks_skipped;               \
   }
 #define ELSE_CHAR(LABEL) \
   case ' ':     \
@@ -73,19 +65,19 @@ really_inline void adjust_next_idx(uint32_t& next_idx, uint32_t start_idx, uint3
  * The JSON is parsed to a tape, see the accompanying tape.md file
  * for documentation.
  ***********/
-WARN_UNUSED  int
+WARN_UNUSED int
 unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
-  uint32_t structural_block = 0; // current structural block we're looking at
-  uint64_t structurals = pj.structural_blocks[structural_block];
-  uint32_t next_idx = trailing_zeroes(structurals); // *index* of the structural block we're looking at
-  uint32_t idx; // location of the structural character in the input (buf)
-  uint8_t c;    // used to track the (structural) character we are looking at, updated by UPDATE_CHAR macro
-  uint32_t depth = 0; // could have an arbitrary starting depth
   pj.init();          // sets is_valid to false
   if (pj.byte_capacity < len) {
-    pj.error_code = simdjson::CAPACITY;
+    pj.error_code = CAPACITY;
     return pj.error_code;
   }
+
+  const uint8_t *block = buf;
+  uint32_t depth = 0;
+  uint64_t* structurals = pj.structural_blocks;
+  int offset = trailing_zeroes(*structurals);
+  *structurals = clear_lowest_bit(*structurals);
 
   /*//////////////////////////// START STATE /////////////////////////////
    */
@@ -101,8 +93,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
   }
 
 start:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (block[offset]) {
   case '{':
     pj.containing_scope_offset[depth] = pj.get_current_loc();
     SET_GOTO_START_CONTINUE();
@@ -110,7 +101,7 @@ start:
     if (depth >= pj.depth_capacity) {
       goto fail;
     }
-    pj.write_tape(0, c); /* strangely, moving this to object_begin slows things down */
+    pj.write_tape(0, block[offset]); /* strangely, moving this to object_begin slows things down */
     goto object_begin;
   case '[':
     pj.containing_scope_offset[depth] = pj.get_current_loc();
@@ -119,7 +110,7 @@ start:
     if (depth >= pj.depth_capacity) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     goto array_begin;
     /* #define SIMDJSON_ALLOWANYTHINGINROOT
      * A JSON text is a serialized value.  Note that certain previous
@@ -144,12 +135,12 @@ start:
     }
     memcpy(copy, buf, len);
     memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_true_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
+    if (!is_valid_true_atom(reinterpret_cast<const uint8_t *>(copy) + (block-buf+offset))) {
       free(copy);
       goto fail;
     }
     free(copy);
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   }
   case 'f': {
@@ -158,18 +149,19 @@ start:
      * this only applies to the JSON document made solely of the false
      * value.
      * this will almost never be called in practice */
+    
     char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
     if (copy == nullptr) {
       goto fail;
     }
     memcpy(copy, buf, len);
     memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_false_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
+    if (!is_valid_false_atom(reinterpret_cast<const uint8_t *>(copy) + (block-buf+offset))) {
       free(copy);
       goto fail;
     }
     free(copy);
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   }
   case 'n': {
@@ -183,12 +175,12 @@ start:
     }
     memcpy(copy, buf, len);
     memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_null_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
+    if (!is_valid_null_atom(reinterpret_cast<const uint8_t *>(copy) + (block-buf+offset))) {
       free(copy);
       goto fail;
     }
     free(copy);
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   }
   case '0':
@@ -215,8 +207,7 @@ start:
     }
     memcpy(copy, buf, len);
     memset(copy + len, ' ', SIMDJSON_PADDING);
-    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, idx,
-                      false)) {
+    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, (block-buf+offset), false)) {
       free(copy);
       goto fail;
     }
@@ -234,7 +225,7 @@ start:
     }
     memcpy(copy, buf, len);
     memset(copy + len, ' ', SIMDJSON_PADDING);
-    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, idx, true)) {
+    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, (block-buf+offset), true)) {
       free(copy);
       goto fail;
     }
@@ -244,8 +235,8 @@ start:
   ELSE_CHAR(start);
   }
 start_continue:
-  /* the string might not be NULL terminated. */
-  if (AT_EOF()) {
+  // Validate that this is the last structural
+  if (*structurals == 0 && *(structurals+1) == 0) {
     goto succeed;
   } else {
     goto fail;
@@ -253,8 +244,7 @@ start_continue:
   /*//////////////////////////// OBJECT STATES ///////////////////////////*/
 
 object_begin:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (ADVANCE()) {
   case '"': {
     PARSE_STRING();
     goto object_key_state;
@@ -266,36 +256,34 @@ object_begin:
   }
 
 object_key_state:
-  UPDATE_CHAR();
-  if (c != ':') {
-    switch (c) {
+  if (ADVANCE() != ':') {
+    switch (block[offset]) {
       ELSE_CHAR(object_key_state)
     }
   }
 object_value_state:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (ADVANCE()) {
   case '"': {
     PARSE_STRING();
     break;
   }
   case 't':
-    if (!is_valid_true_atom(buf + idx)) {
+    if (!is_valid_true_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   case 'f':
-    if (!is_valid_false_atom(buf + idx)) {
+    if (!is_valid_false_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   case 'n':
-    if (!is_valid_null_atom(buf + idx)) {
+    if (!is_valid_null_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   case '0':
   case '1':
@@ -307,21 +295,20 @@ object_value_state:
   case '7':
   case '8':
   case '9': {
-    if (!parse_number(buf, pj, idx, false)) {
+    if (!parse_number(block, pj, offset, false)) {
       goto fail;
     }
     break;
   }
   case '-': {
-    if (!parse_number(buf, pj, idx, true)) {
+    if (!parse_number(block, pj, offset, true)) {
       goto fail;
     }
     break;
   }
   case '{': {
     pj.containing_scope_offset[depth] = pj.get_current_loc();
-    pj.write_tape(0, c); /* here the compilers knows what c is so this gets
-                            optimized */
+    pj.write_tape(0, block[offset]); /* here the compilers knows what block[offset] is so this gets optimized */
     /* we have not yet encountered } so we need to come back for it */
     SET_GOTO_OBJECT_CONTINUE()
     /* we found an object inside an object, so we need to increment the
@@ -335,8 +322,7 @@ object_value_state:
   }
   case '[': {
     pj.containing_scope_offset[depth] = pj.get_current_loc();
-    pj.write_tape(0, c); /* here the compilers knows what c is so this gets
-                            optimized */
+    pj.write_tape(0, block[offset]); /* here the compilers knows what block[offset] is so this gets optimized */
     /* we have not yet encountered } so we need to come back for it */
     SET_GOTO_OBJECT_CONTINUE()
     /* we found an array inside an object, so we need to increment the depth
@@ -351,11 +337,9 @@ object_value_state:
   }
 
 object_continue:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (ADVANCE()) {
   case ',':
-    UPDATE_CHAR();
-    if (c != '"') {
+    if (ADVANCE() != '"') {
       goto fail;
     } else {
       PARSE_STRING();
@@ -371,7 +355,7 @@ object_continue:
 scope_end:
   /* write our tape location to the header scope */
   depth--;
-  pj.write_tape(pj.containing_scope_offset[depth], c);
+  pj.write_tape(pj.containing_scope_offset[depth], block[offset]);
   pj.annotate_previous_loc(pj.containing_scope_offset[depth],
                            pj.get_current_loc());
   /* goto saved_state */
@@ -379,8 +363,7 @@ scope_end:
 
   /*//////////////////////////// ARRAY STATES ///////////////////////////*/
 array_begin:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (ADVANCE()) {
     case ']':
       goto scope_end;
     case ' ':
@@ -391,30 +374,30 @@ array_begin:
   }
 
 main_array_switch:
-  /* we call update char on all paths in, so we can peek at c on the
+  /* we call update char on all paths in, so we can peek at current on the
    * on paths that can accept a close square brace (post-, and at start) */
-  switch (c) {
+  switch (block[offset]) {
   case '"': {
     PARSE_STRING();
     break;
   }
   case 't':
-    if (!is_valid_true_atom(buf + idx)) {
+    if (!is_valid_true_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   case 'f':
-    if (!is_valid_false_atom(buf + idx)) {
+    if (!is_valid_false_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break;
   case 'n':
-    if (!is_valid_null_atom(buf + idx)) {
+    if (!is_valid_null_atom(&block[offset])) {
       goto fail;
     }
-    pj.write_tape(0, c);
+    pj.write_tape(0, block[offset]);
     break; /* goto array_continue; */
 
   case '0':
@@ -427,13 +410,13 @@ main_array_switch:
   case '7':
   case '8':
   case '9': {
-    if (!parse_number(buf, pj, idx, false)) {
+    if (!parse_number(block, pj, offset, false)) {
       goto fail;
     }
     break; /* goto array_continue; */
   }
   case '-': {
-    if (!parse_number(buf, pj, idx, true)) {
+    if (!parse_number(block, pj, offset, true)) {
       goto fail;
     }
     break; /* goto array_continue; */
@@ -441,8 +424,7 @@ main_array_switch:
   case '{': {
     /* we have not yet encountered ] so we need to come back for it */
     pj.containing_scope_offset[depth] = pj.get_current_loc();
-    pj.write_tape(0, c); /* here the compilers knows what c is so this gets
-                            optimized */
+    pj.write_tape(0, block[offset]); /* here the compilers knows what block[offset] is so this gets optimized */
     SET_GOTO_ARRAY_CONTINUE()
     /* we found an object inside an array, so we need to increment the depth
      */
@@ -456,8 +438,7 @@ main_array_switch:
   case '[': {
     /* we have not yet encountered ] so we need to come back for it */
     pj.containing_scope_offset[depth] = pj.get_current_loc();
-    pj.write_tape(0, c); /* here the compilers knows what c is so this gets
-                            optimized */
+    pj.write_tape(0, block[offset]); /* here the compilers knows what block[offset] is so this gets optimized */
     SET_GOTO_ARRAY_CONTINUE()
     /* we found an array inside an array, so we need to increment the depth
      */
@@ -471,17 +452,16 @@ main_array_switch:
   case '\r':
   case '\t':
   case '\n':
-    UPDATE_CHAR();
+    ADVANCE();
     goto main_array_switch;
   default:
     goto fail;
   }
 
 array_continue:
-  UPDATE_CHAR();
-  switch (c) {
+  switch (ADVANCE()) {
   case ',':
-    UPDATE_CHAR();
+    ADVANCE();
     goto main_array_switch;
   case ']':
     goto scope_end;
@@ -522,7 +502,7 @@ fail:
     pj.error_code = simdjson::DEPTH_ERROR;
     return pj.error_code;
   }
-  switch (c) {
+  switch (block[offset]) {
   case '"':
     pj.error_code = simdjson::STRING_ERROR;
     return pj.error_code;

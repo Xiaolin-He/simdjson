@@ -137,6 +137,9 @@ really_inline uint64_t follows(const uint64_t match, const uint64_t filler, uint
 }
 
 really_inline ErrorValues json_structural_scanner::at_eof(ParsedJson& pj) {
+  // Cap off structural_blocks with a 0 so we can safely go off the end and only pay
+  // a branch penalty on the very last block
+  *this->next_structural_block = 0;
   pj.num_structural_blocks = this->next_structural_block - pj.structural_blocks;
   if (prev_in_string) {
     return UNCLOSED_STRING;
