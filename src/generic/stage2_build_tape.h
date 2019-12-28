@@ -31,21 +31,18 @@
   }
 #endif
 
-template<typename F>
-really_inline bool with_padded_copy(const uint8_t* buf, size_t len, const F& f) {
-  /* we need to make a copy to make sure that the string is NULL
-    * terminated.
-    * this is done only for JSON documents made of a sole number
-    * this will almost never be called in practice */
-  uint8_t *copy = static_cast<uint8_t *>(malloc(len+SIMDJSON_PADDING));
-  if (copy == nullptr) {
-    return false;
-  }
-  memcpy(copy, buf, len);
-  memset(copy + len, ' ', SIMDJSON_PADDING);
-  bool result = f(copy);
-  free(copy);
-  return result;
+#define WITH_PADDED_COPY(EXPR) { \
+  uint8_t *copy = static_cast<uint8_t *>(malloc(len+SIMDJSON_PADDING)); \
+  if (copy == nullptr) { \
+    goto fail; \
+  } \
+  memcpy(copy, buf, len); \
+  memset(copy + len, ' ', SIMDJSON_PADDING); \
+  if (!(EXPR)) { \
+    free(copy); \
+    goto fail; \
+  } \
+  free(copy); \
 }
 
 /************
@@ -115,23 +112,17 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     break;
   }
   case 't': {
-    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_true_atom(copy + idx); })) {
-      goto fail;
-    }
+    WITH_PADDED_COPY(is_valid_true_atom(copy + idx));
     pj.write_tape(0, c);
     break;
   }
   case 'f': {
-    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_false_atom(copy + idx); })) {
-      goto fail;
-    }
+    WITH_PADDED_COPY(is_valid_false_atom(copy + idx));
     pj.write_tape(0, c);
     break;
   }
   case 'n': {
-    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_null_atom(copy + idx); })) {
-      goto fail;
-    }
+    WITH_PADDED_COPY(is_valid_null_atom(copy + idx));
     pj.write_tape(0, c);
     break;
   }
@@ -145,15 +136,11 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
   case '7':
   case '8':
   case '9': {
-    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return parse_number(copy, pj, idx, false); })) {
-      goto fail;
-    }
+    WITH_PADDED_COPY(parse_number(copy, pj, idx, false));
     break;
   }
   case '-': {
-    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return parse_number(copy, pj, idx, true); })) {
-      goto fail;
-    }
+    WITH_PADDED_COPY(parse_number(copy, pj, idx, true));
     break;
   }
   default:
