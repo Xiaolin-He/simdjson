@@ -31,6 +31,23 @@
   }
 #endif
 
+template<typename F>
+really_inline bool with_padded_copy(const uint8_t* buf, size_t len, const F& f) {
+  /* we need to make a copy to make sure that the string is NULL
+    * terminated.
+    * this is done only for JSON documents made of a sole number
+    * this will almost never be called in practice */
+  uint8_t *copy = static_cast<uint8_t *>(malloc(len+SIMDJSON_PADDING));
+  if (copy == nullptr) {
+    return false;
+  }
+  memcpy(copy, buf, len);
+  memset(copy + len, ' ', SIMDJSON_PADDING);
+  bool result = f(copy);
+  free(copy);
+  return result;
+}
+
 /************
  * The JSON is parsed to a tape, see the accompanying tape.md file
  * for documentation.
@@ -98,60 +115,23 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     break;
   }
   case 't': {
-    /* we need to make a copy to make sure that the string is space
-     * terminated.
-     * this only applies to the JSON document made solely of the true value.
-     * this will almost never be called in practice */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
+    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_true_atom(copy + idx); })) {
       goto fail;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_true_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
-      free(copy);
-      goto fail;
-    }
-    free(copy);
     pj.write_tape(0, c);
     break;
   }
   case 'f': {
-    /* we need to make a copy to make sure that the string is space
-     * terminated.
-     * this only applies to the JSON document made solely of the false
-     * value.
-     * this will almost never be called in practice */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
+    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_false_atom(copy + idx); })) {
       goto fail;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_false_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
-      free(copy);
-      goto fail;
-    }
-    free(copy);
     pj.write_tape(0, c);
     break;
   }
   case 'n': {
-    /* we need to make a copy to make sure that the string is space
-     * terminated.
-     * this only applies to the JSON document made solely of the null value.
-     * this will almost never be called in practice */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
+    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return is_valid_null_atom(copy + idx); })) {
       goto fail;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', sizeof(uint64_t));
-    if (!is_valid_null_atom(reinterpret_cast<const uint8_t *>(copy) + idx)) {
-      free(copy);
-      goto fail;
-    }
-    free(copy);
     pj.write_tape(0, c);
     break;
   }
@@ -165,44 +145,15 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
   case '7':
   case '8':
   case '9': {
-    /* we need to make a copy to make sure that the string is space
-     * terminated.
-     * this is done only for JSON documents made of a sole number
-     * this will almost never be called in practice. We terminate with a
-     * space
-     * because we do not want to allow NULLs in the middle of a number
-     * (whereas a
-     * space in the middle of a number would be identified in stage 1). */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
+    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return parse_number(copy, pj, idx, false); })) {
       goto fail;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', SIMDJSON_PADDING);
-    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, idx,
-                      false)) {
-      free(copy);
-      goto fail;
-    }
-    free(copy);
     break;
   }
   case '-': {
-    /* we need to make a copy to make sure that the string is NULL
-     * terminated.
-     * this is done only for JSON documents made of a sole number
-     * this will almost never be called in practice */
-    char *copy = static_cast<char *>(malloc(len + SIMDJSON_PADDING));
-    if (copy == nullptr) {
+    if (!with_padded_copy(buf, len, [&](const uint8_t* copy) { return parse_number(copy, pj, idx, true); })) {
       goto fail;
     }
-    memcpy(copy, buf, len);
-    memset(copy + len, ' ', SIMDJSON_PADDING);
-    if (!parse_number(reinterpret_cast<const uint8_t *>(copy), pj, idx, true)) {
-      free(copy);
-      goto fail;
-    }
-    free(copy);
     break;
   }
   default:
