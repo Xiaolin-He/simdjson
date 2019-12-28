@@ -32,7 +32,7 @@
 #endif
 
 #define WITH_PADDED_COPY(EXPR) { \
-  uint8_t *copy = static_cast<uint8_t *>(malloc(len+SIMDJSON_PADDING)); \
+  char *copy = static_cast<char *>(malloc(len+SIMDJSON_PADDING)); \
   if (copy == nullptr) { \
     goto fail; \
   } \
@@ -112,17 +112,17 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     break;
   }
   case 't': {
-    WITH_PADDED_COPY(is_valid_true_atom(copy + idx));
+    WITH_PADDED_COPY(is_valid_true_atom(reinterpret_cast<uint8_t*>(copy) + idx));
     pj.write_tape(0, c);
     break;
   }
   case 'f': {
-    WITH_PADDED_COPY(is_valid_false_atom(copy + idx));
+    WITH_PADDED_COPY(is_valid_false_atom(reinterpret_cast<uint8_t*>(copy) + idx));
     pj.write_tape(0, c);
     break;
   }
   case 'n': {
-    WITH_PADDED_COPY(is_valid_null_atom(copy + idx));
+    WITH_PADDED_COPY(is_valid_null_atom(reinterpret_cast<uint8_t*>(copy) + idx));
     pj.write_tape(0, c);
     break;
   }
@@ -136,11 +136,11 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
   case '7':
   case '8':
   case '9': {
-    WITH_PADDED_COPY(parse_number(copy, pj, idx, false));
+    WITH_PADDED_COPY(parse_number(reinterpret_cast<uint8_t*>(copy), pj, idx, false));
     break;
   }
   case '-': {
-    WITH_PADDED_COPY(parse_number(copy, pj, idx, true));
+    WITH_PADDED_COPY(parse_number(reinterpret_cast<uint8_t*>(copy), pj, idx, true));
     break;
   }
   default:
