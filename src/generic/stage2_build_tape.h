@@ -6,12 +6,18 @@
 const size_t BLOCK_SIZE = 64;
 
 struct structural_position {
-  uint64_t* structurals;
+  uint64_t* next_structurals;
   const uint8_t* block;
   int offset;
-  really_inline structural_position(const uint8_t* buf, ParsedJson& pj) : structurals{pj.structural_blocks}, block{buf}, offset{0} {
-    offset = trailing_zeroes(*structurals);
-    *structurals = clear_lowest_bit(*structurals);
+  bool is_last_structural_in_block;
+  really_inline structural_position(const uint8_t* buf, ParsedJson& pj) :
+    next_structurals{pj.structural_blocks},
+    block{buf},
+    offset{0},
+    is_last_structural_in_block{false}
+  {
+    offset = trailing_zeroes(*next_structurals);
+    *next_structurals = clear_lowest_bit(*next_structurals);
   }
 
   really_inline const uint8_t* current() {
@@ -19,18 +25,20 @@ struct structural_position {
   }
 
   really_inline bool at_eof() {
-    return *structurals == 0 && *(structurals+1) == 0;
+    return *next_structurals == 0;
   }
 
   really_inline uint8_t advance() {
-    // If there are no more structurals in this block, advance to the next
-    bool is_last_structural_in_block = *structurals == 0;
+    // Advance "block" if we just moved to the next structural in the block
     block += is_last_structural_in_block*BLOCK_SIZE;
-    structurals += is_last_structural_in_block;
 
     // Steal the trailing bit, taking the next structural offset
-    offset = trailing_zeroes(*structurals);
-    *structurals = clear_lowest_bit(*structurals);
+    offset = trailing_zeroes(*next_structurals);
+    *next_structurals = clear_lowest_bit(*next_structurals);
+
+    // If there are no more structurals in this block, advance to the next
+    is_last_structural_in_block = *next_structurals == 0;
+    next_structurals += is_last_structural_in_block;
     return *this->current();
   }
 };
