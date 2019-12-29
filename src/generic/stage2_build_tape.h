@@ -7,17 +7,14 @@ const size_t BLOCK_SIZE = 64;
 
 struct structural_position {
   uint64_t* next_structurals;
+  const uint8_t* next_block;
   const uint8_t* block;
   int offset;
-  bool is_last_structural_in_block;
   really_inline structural_position(const uint8_t* buf, ParsedJson& pj) :
     next_structurals{pj.structural_blocks},
-    block{buf},
-    offset{0},
-    is_last_structural_in_block{false}
+    next_block{buf}
   {
-    offset = trailing_zeroes(*next_structurals);
-    *next_structurals = clear_lowest_bit(*next_structurals);
+    advance();
   }
 
   really_inline const uint8_t* current() {
@@ -30,15 +27,17 @@ struct structural_position {
 
   really_inline uint8_t advance() {
     // Advance "block" if we just moved to the next structural in the block
-    block += is_last_structural_in_block*BLOCK_SIZE;
+    block = next_block;
 
     // Steal the trailing bit, taking the next structural offset
     offset = trailing_zeroes(*next_structurals);
     *next_structurals = clear_lowest_bit(*next_structurals);
 
     // If there are no more structurals in this block, advance to the next
-    is_last_structural_in_block = *next_structurals == 0;
+    bool is_last_structural_in_block = *next_structurals == 0;
+    next_block += is_last_structural_in_block*BLOCK_SIZE;
     next_structurals += is_last_structural_in_block;
+
     return *this->current();
   }
 };
@@ -55,7 +54,7 @@ struct structural_position {
     /* If it completely skipped any blocks, advance block */ \
     int blocks_skipped = new_offset / BLOCK_SIZE - 1; \
     blocks_skipped = (blocks_skipped < 0) ? 0 : blocks_skipped; /* Saturating sub via CMOV */ \
-    pos.block += BLOCK_SIZE*blocks_skipped;               \
+    pos.next_block += BLOCK_SIZE*blocks_skipped;               \
   }
 #define ELSE_CHAR(LABEL) \
   case ' ':     \
