@@ -52,28 +52,29 @@ struct bitmask_block_iterator {
       goto fail;                                      \
     }                                                 \
     /* If it completely skipped any blocks, advance block */ \
-    int blocks_skipped = new_offset / bitmask_block_iterator::BLOCK_SIZE - 1; \
-    blocks_skipped = (blocks_skipped < 0) ? 0 : blocks_skipped; /* Saturating sub via CMOV */ \
-    structurals.next_block += bitmask_block_iterator::BLOCK_SIZE*blocks_skipped;               \
+    int skipped = new_offset - 2*bitmask_block_iterator::BLOCK_SIZE + 1; \
+    skipped = skipped < 0 ? 0 : skipped; \
+    structurals.next_block += ROUNDUP_N(skipped, bitmask_block_iterator::BLOCK_SIZE); \
   }
-#define CASE_CHAR(LABEL) \
-  case ' ':     \
-  case '\n':    \
-  case '\r':    \
-  case '\t':    \
+#define RETRY_SPACES_CASE(RETRY) \
+  case ' ': \
+  case '\n': \
+  case '\t': \
+  case '\r': \
     current.block += bitmask_block_iterator::BLOCK_SIZE; \
     structurals.next_block += bitmask_block_iterator::BLOCK_SIZE; \
-    goto LABEL;
-#define ELSE_CHAR(LABEL) \
-  case ' ':     \
-  case '\n':    \
-  case '\r':    \
-  case '\t':    \
-    current.block += bitmask_block_iterator::BLOCK_SIZE; \
-    structurals.next_block += bitmask_block_iterator::BLOCK_SIZE; \
-    goto LABEL; \
-  default:      \
-    goto fail;
+    goto RETRY; \
+
+#define RETRY_SPACES(RETRY) \
+  switch (*current) { \
+    case ' ': \
+    case '\t': \
+    case '\n': \
+    case '\r': \
+      current.block += bitmask_block_iterator::BLOCK_SIZE; \
+      structurals.next_block += bitmask_block_iterator::BLOCK_SIZE; \
+      goto RETRY; \
+  }
 
 #ifdef SIMDJSON_USE_COMPUTED_GOTO
 #define SET_GOTO_ARRAY_CONTINUE() pj.ret_address[depth] = &&array_continue;
@@ -125,7 +126,7 @@ unified_machine(const uint8_t *buf, size_t len, ParsedJson &pj) {
     goto fail;
   }
 
-start:
+start_retry:
   switch (*current) {
   case '{':
     pj.containing_scope_offset[depth] = pj.get_current_loc();
@@ -265,7 +266,9 @@ start:
     free(copy);
     break;
   }
-  ELSE_CHAR(start);
+  default:
+    RETRY_SPACES(start_retry);
+    goto fail;
   }
 start_continue:
   // Validate that this is the last structural
@@ -276,8 +279,11 @@ start_continue:
   }
   /*//////////////////////////// OBJECT STATES ///////////////////////////*/
 
+// Beginning of object: } or "string":<value> next
 object_begin:
-  switch (*(current = structurals.next())) {
+   current = structurals.next();
+object_begin_retry:
+  switch (*current) {
   case '"': {
     PARSE_STRING();
     goto object_key_state;
@@ -285,17 +291,23 @@ object_begin:
   case '}':
     goto scope_end; /* could also go to object_continue */
   default:
+    RETRY_SPACES(object_begin_retry);
     goto fail;
   }
 
+// After object key: : next
 object_key_state:
-  if (*(current = structurals.next()) != ':') {
-    switch (*current) {
-      ELSE_CHAR(object_key_state)
-    }
+  current = structurals.next();
+object_key_state_retry:
+  if (unlikely(*current != ':')) {
+    RETRY_SPACES(object_key_state_retry);
+    goto fail;
   }
-object_value_state:
-  switch (*(current = structurals.next())) {
+
+  // After object key and : <value> next
+  current = structurals.next();
+object_value_retry:
+  switch (*current) {
   case '"': {
     PARSE_STRING();
     break;
@@ -366,22 +378,35 @@ object_value_state:
     }
     goto array_begin;
   }
-  ELSE_CHAR(object_value_state)
+  default:
+    RETRY_SPACES(object_value_retry);
+    goto fail;
   }
 
+// After object key/value pair: , or } next
 object_continue:
-  switch (*(current = structurals.next())) {
+  current = structurals.next();
+object_continue_retry:
+  switch (*current) {
   case ',':
-    if (*(current = structurals.next()) != '"') {
-      goto fail;
-    } else {
-      PARSE_STRING();
-      goto object_key_state;
-    }
+    goto object_next_key;
   case '}':
     goto scope_end;
-  ELSE_CHAR(object_continue)
+  default:
+    RETRY_SPACES(object_continue_retry);
+    goto fail;
   }
+
+// After ,: "string":<value> next
+object_next_key:
+  current = structurals.next();
+object_next_key_retry:
+  if (unlikely(*current != '"')) {
+    RETRY_SPACES(object_next_key_retry);
+    goto fail;
+  }
+  PARSE_STRING();
+  goto object_key_state;
 
   /*//////////////////////////// COMMON STATE ///////////////////////////*/
 
@@ -396,11 +421,13 @@ scope_end:
 
   /*//////////////////////////// ARRAY STATES ///////////////////////////*/
 array_begin:
-  switch (*(current = structurals.next())) {
-    case ']':
-      goto scope_end;
-    CASE_CHAR(array_begin)
+  current = structurals.next();
+array_begin_retry:
+  if (*current == ']') {
+    goto scope_end;
   }
+  RETRY_SPACES(array_begin_retry);
+  // Fall into main_array_switch if we get here.
 
 main_array_switch:
   /* we call update char on all paths in, so we can peek at current on the
@@ -477,17 +504,23 @@ main_array_switch:
     }
     goto array_begin;
   }
-  ELSE_CHAR(main_array_switch)
+  default:
+    RETRY_SPACES(main_array_switch);
+    goto fail;
   }
 
 array_continue:
-  switch (*(current = structurals.next())) {
+  current = structurals.next();
+array_continue_retry:
+  switch (*current) {
   case ',':
     current = structurals.next();
     goto main_array_switch;
   case ']':
     goto scope_end;
-  ELSE_CHAR(array_continue)
+  default:
+    RETRY_SPACES(array_continue_retry);
+    goto fail;
   }
 
   /*//////////////////////////// FINAL STATES ///////////////////////////*/
